@@ -1,0 +1,7 @@
+apiVersion: infra.mdstechinc.com/v1alpha1
+kind: CloudFormation
+metadata:
+  name: cloudformation-sample
+spec:
+  # Add fields here
+  foo: bar

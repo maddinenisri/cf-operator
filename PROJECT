@@ -2,6 +2,11 @@ domain: mdstechinc.com
 layout: go.kubebuilder.io/v3
 projectName: cf-operator
 repo: github.com/maddinenisri/cf-operator
+resources:
+- crdVersion: v1
+  group: infra
+  kind: CloudFormation
+  version: v1alpha1
 version: 3-alpha
 plugins:
   manifests.sdk.operatorframework.io/v2: {}
