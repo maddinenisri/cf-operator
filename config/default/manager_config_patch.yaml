@@ -6,6 +6,7 @@ metadata:
 spec:
   template:
     spec:
+      serviceAccount: cf-operator-sa
       containers:
       - name: manager
         args:

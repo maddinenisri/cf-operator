@@ -5,6 +5,14 @@ metadata:
     control-plane: controller-manager
   name: system
 ---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  annotations:
+    eks.amazonaws.com/role-arn: arn:aws:iam::280268084004:role/eksirsa
+  name: sa
+  namespace: system
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -23,7 +31,7 @@ spec:
         control-plane: controller-manager
     spec:
       securityContext:
-        runAsUser: 65532
+        fsGroup: 65534
       containers:
       - command:
         - /manager
@@ -31,8 +39,6 @@ spec:
         - --leader-elect
         image: controller:latest
         name: manager
-        securityContext:
-          allowPrivilegeEscalation: false
         livenessProbe:
           httpGet:
             path: /healthz
