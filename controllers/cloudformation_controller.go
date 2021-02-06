@@ -58,8 +58,9 @@ var (
 // CloudFormationReconciler reconciles a CloudFormation object
 type CloudFormationReconciler struct {
 	client.Client
-	Log    logr.Logger
-	Scheme *runtime.Scheme
+	Log      logr.Logger
+	Scheme   *runtime.Scheme
+	cfClient cloudformationiface.CloudFormationAPI
 }
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
@@ -91,7 +92,7 @@ func (r *CloudFormationReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		return ctrl.Result{}, err
 	}
 
-	cfClient := r.awsClientSession()
+	// r.awsClientSession()
 
 	// Check if the Cloudformation instance is delete event
 	isMarkedToBeDeleted := instance.GetDeletionTimestamp() != nil
@@ -100,7 +101,7 @@ func (r *CloudFormationReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		log.WithValues("Finalizers", instance.GetFinalizers())
 		if contains(instance.GetFinalizers(), cfFinalizer) {
 			log.Info("Finalizer is exist")
-			if err := r.finalizeCloudFormation(cfClient, instance); err != nil {
+			if err := r.finalizeCloudFormation(instance); err != nil {
 				return ctrl.Result{}, err
 			}
 			controllerutil.RemoveFinalizer(instance, cfFinalizer)
@@ -120,22 +121,22 @@ func (r *CloudFormationReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		log.Info("Added finalizers")
 	}
 
-	exists, err := r.stackExists(cfClient, instance)
+	exists, err := r.stackExists(instance)
 	if err != nil {
 		log.Info("Cloudformation object is not found in AWS")
 	}
 
 	if exists {
-		return ctrl.Result{}, r.updateStack(ctx, cfClient, instance)
+		return ctrl.Result{}, r.updateStack(ctx, instance)
 	}
 
-	return ctrl.Result{}, r.createStack(ctx, cfClient, instance)
+	return ctrl.Result{}, r.createStack(ctx, instance)
 }
 
-func (r *CloudFormationReconciler) createStack(ctx context.Context, cfClient cloudformationiface.CloudFormationAPI, cfStack *infrav1alpha1.CloudFormation) error {
+func (r *CloudFormationReconciler) createStack(ctx context.Context, cfStack *infrav1alpha1.CloudFormation) error {
 	r.Log.WithValues("stack", cfStack.Name).Info("Create Stack")
 
-	hasOwnership, err := r.hasOwnership(cfClient, cfStack)
+	hasOwnership, err := r.hasOwnership(cfStack)
 	if err != nil {
 		return err
 	}
@@ -159,20 +160,20 @@ func (r *CloudFormationReconciler) createStack(ctx context.Context, cfClient clo
 		Tags:         stackTags,
 	}
 
-	if _, err := cfClient.CreateStack(input); err != nil {
+	if _, err := r.cfClient.CreateStack(input); err != nil {
 		return err
 	}
 
-	if err := r.waitWhile(cfClient, cfStack, cloudformation.StackStatusCreateInProgress); err != nil {
+	if err := r.waitWhile(cfStack, cloudformation.StackStatusCreateInProgress); err != nil {
 		return err
 	}
-	return r.updateStackStatus(ctx, cfClient, cfStack)
+	return r.updateStackStatus(ctx, cfStack)
 }
 
-func (r *CloudFormationReconciler) updateStack(ctx context.Context, cfClient cloudformationiface.CloudFormationAPI, cfStack *infrav1alpha1.CloudFormation) error {
+func (r *CloudFormationReconciler) updateStack(ctx context.Context, cfStack *infrav1alpha1.CloudFormation) error {
 	r.Log.WithValues("stack", cfStack.Name).Info("Create Stack")
 
-	hasOwnership, err := r.hasOwnership(cfClient, cfStack)
+	hasOwnership, err := r.hasOwnership(cfStack)
 	if err != nil {
 		return err
 	}
@@ -196,7 +197,7 @@ func (r *CloudFormationReconciler) updateStack(ctx context.Context, cfClient clo
 		Tags:         stackTags,
 	}
 
-	if _, err := cfClient.UpdateStack(input); err != nil {
+	if _, err := r.cfClient.UpdateStack(input); err != nil {
 		if strings.Contains(err.Error(), "No updates are to be performed.") {
 			r.Log.WithValues("stack", cfStack.Name).Info("stack already updated")
 			return nil
@@ -204,16 +205,16 @@ func (r *CloudFormationReconciler) updateStack(ctx context.Context, cfClient clo
 		return err
 	}
 
-	if err := r.waitWhile(cfClient, cfStack, cloudformation.StackStatusCreateInProgress); err != nil {
+	if err := r.waitWhile(cfStack, cloudformation.StackStatusCreateInProgress); err != nil {
 		return err
 	}
-	return r.updateStackStatus(ctx, cfClient, cfStack)
+	return r.updateStackStatus(ctx, cfStack)
 }
 
-func (r *CloudFormationReconciler) deleteStack(cfClient cloudformationiface.CloudFormationAPI, cfStack *infrav1alpha1.CloudFormation) error {
+func (r *CloudFormationReconciler) deleteStack(cfStack *infrav1alpha1.CloudFormation) error {
 	r.Log.WithValues("stack", cfStack.Name).Info("Delete Stack")
 
-	hasOwnership, err := r.hasOwnership(cfClient, cfStack)
+	hasOwnership, err := r.hasOwnership(cfStack)
 	if err != nil {
 		return err
 	}
@@ -227,16 +228,16 @@ func (r *CloudFormationReconciler) deleteStack(cfClient cloudformationiface.Clou
 		StackName: aws.String(cfStack.Name),
 	}
 
-	if _, err := cfClient.DeleteStack(input); err != nil {
+	if _, err := r.cfClient.DeleteStack(input); err != nil {
 		return err
 	}
 
-	return r.waitWhile(cfClient, cfStack, cloudformation.StackStatusDeleteInProgress)
+	return r.waitWhile(cfStack, cloudformation.StackStatusDeleteInProgress)
 }
 
-func (r *CloudFormationReconciler) waitWhile(cfClient cloudformationiface.CloudFormationAPI, cfStack *infrav1alpha1.CloudFormation, status string) error {
+func (r *CloudFormationReconciler) waitWhile(cfStack *infrav1alpha1.CloudFormation, status string) error {
 	for {
-		cfs, err := r.getStack(cfClient, cfStack)
+		cfs, err := r.getStack(cfStack)
 		if err != nil {
 			if err == ErrStackNotFound {
 				return nil
@@ -303,8 +304,8 @@ func (r *CloudFormationReconciler) stackTags(cfStack *infrav1alpha1.CloudFormati
 	return tags, nil
 }
 
-func (r *CloudFormationReconciler) hasOwnership(cfClient cloudformationiface.CloudFormationAPI, cfStack *infrav1alpha1.CloudFormation) (bool, error) {
-	exists, err := r.stackExists(cfClient, cfStack)
+func (r *CloudFormationReconciler) hasOwnership(cfStack *infrav1alpha1.CloudFormation) (bool, error) {
+	exists, err := r.stackExists(cfStack)
 	if err != nil {
 		return false, err
 	}
@@ -312,7 +313,7 @@ func (r *CloudFormationReconciler) hasOwnership(cfClient cloudformationiface.Clo
 		return true, nil
 	}
 
-	cfs, err := r.getStack(cfClient, cfStack)
+	cfs, err := r.getStack(cfStack)
 	if err != nil {
 		return false, err
 	}
@@ -341,9 +342,9 @@ func (r *CloudFormationReconciler) getObjectReference(owner metav1.Object) (type
 	return ref.UID, nil
 }
 
-func (r *CloudFormationReconciler) updateStackStatus(ctx context.Context, cfClient cloudformationiface.CloudFormationAPI, cfStack *infrav1alpha1.CloudFormation) error {
+func (r *CloudFormationReconciler) updateStackStatus(ctx context.Context, cfStack *infrav1alpha1.CloudFormation) error {
 	r.Log.Info("Update stack status")
-	cfs, err := r.getStack(cfClient, cfStack)
+	cfs, err := r.getStack(cfStack)
 	if err != nil {
 		return err
 	}
@@ -372,11 +373,11 @@ func (r *CloudFormationReconciler) updateStackStatus(ctx context.Context, cfClie
 func (r *CloudFormationReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&infrav1alpha1.CloudFormation{}).
-		Complete(r)
+		Complete(r.awsClientSession())
 }
 
-func (r *CloudFormationReconciler) stackExists(cfClient cloudformationiface.CloudFormationAPI, cfStack *infrav1alpha1.CloudFormation) (bool, error) {
-	_, err := r.getStack(cfClient, cfStack)
+func (r *CloudFormationReconciler) stackExists(cfStack *infrav1alpha1.CloudFormation) (bool, error) {
+	_, err := r.getStack(cfStack)
 	if err != nil {
 		if err == ErrStackNotFound {
 			return false, nil
@@ -387,8 +388,8 @@ func (r *CloudFormationReconciler) stackExists(cfClient cloudformationiface.Clou
 	return true, nil
 }
 
-func (r *CloudFormationReconciler) getStack(cfClient cloudformationiface.CloudFormationAPI, cfStack *infrav1alpha1.CloudFormation) (*cloudformation.Stack, error) {
-	resp, err := cfClient.DescribeStacks(&cloudformation.DescribeStacksInput{
+func (r *CloudFormationReconciler) getStack(cfStack *infrav1alpha1.CloudFormation) (*cloudformation.Stack, error) {
+	resp, err := r.cfClient.DescribeStacks(&cloudformation.DescribeStacksInput{
 		StackName: aws.String(cfStack.Name),
 	})
 	if err != nil {
@@ -404,7 +405,7 @@ func (r *CloudFormationReconciler) getStack(cfClient cloudformationiface.CloudFo
 	return resp.Stacks[0], nil
 }
 
-func (r *CloudFormationReconciler) awsClientSession() cloudformationiface.CloudFormationAPI {
+func (r *CloudFormationReconciler) awsClientSession() *CloudFormationReconciler {
 
 	region, ok := os.LookupEnv("REGION")
 	if !ok {
@@ -415,11 +416,12 @@ func (r *CloudFormationReconciler) awsClientSession() cloudformationiface.CloudF
 	cfClient = cloudformation.New(sess, &aws.Config{
 		Region: aws.String(region),
 	})
-	return cfClient
+	r.cfClient = cfClient
+	return r
 }
 
-func (r *CloudFormationReconciler) finalizeCloudFormation(cfClient cloudformationiface.CloudFormationAPI, cfStack *infrav1alpha1.CloudFormation) error {
-	if err := r.deleteStack(cfClient, cfStack); err != nil {
+func (r *CloudFormationReconciler) finalizeCloudFormation(cfStack *infrav1alpha1.CloudFormation) error {
+	if err := r.deleteStack(cfStack); err != nil {
 		return err
 	}
 	r.Log.Info("Successfully finalized cloudformation resource")
